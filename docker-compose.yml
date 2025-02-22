@@ -1,0 +1,113 @@
+
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    container_name: ollama
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OLLAMA_BACKEND=cuda
+      - OLLAMA_HOST=0.0.0.0:11434
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models:/root/.ollama/models
+    restart: unless-stopped
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        echo "🚀 Запускаем Ollama..."
+        OLLAMA_BACKEND=cuda ollama serve &  # Запуск в фоне
+        echo "⏳ Даем Ollama 5 секунд на запуск..."
+        sleep 5
+        echo "🛠 Проверяем работу сервера..."
+        until curl -s http://localhost:11434/api/tags > /dev/null; do
+          echo "⚠️  Ollama еще не поднялся, ждем..."
+          sleep 2
+        done
+        echo "✅ Ollama запущен, загружаем модели..."
+        if ! ollama list | grep -q 'hf.co/Vikhrmodels/Vikhr-Llama-3.2-1B-instruct-GGUF:F16'; then
+          echo "📥 Загружаем hf.co/Vikhrmodels/Vikhr-Llama-3.2-1B-instruct-GGUF:F16..."
+          ollama pull hf.co/Vikhrmodels/Vikhr-Llama-3.2-1B-instruct-GGUF:F16
+        fi
+        if ! ollama list | grep -q 'deepseek-r1:1.5b'; then
+          echo "📥 Загружаем deepseek-r1:1.5b..."
+          ollama pull deepseek-r1:1.5b
+        fi
+        echo "✅ Все готово!"
+        wait
+#    networks:
+#      - Ollama_DS
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  fastapi:
+    build: ./server
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+
+  consumer:
+    build: ./ollama_app
+    environment:
+      - OLLAMA_API=http://localhost:11434
+    depends_on:
+      - kafka
+      - ollama
+      - redis
+    restart: unless-stopped
+
+  app:
+    build: ./tg_bot
+    container_name: telegram_bot_app
+    environment:
+      TELEGRAM_BOT_KEY: YOUR_API_KEY
+    depends_on:
+      - fastapi
+
+
+
+
+volumes:
+  ollama_data:
+  redis_data:
+
+#networks:
+#  Ollama_DS:
+#    driver: bridge
